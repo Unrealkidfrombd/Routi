@@ -5,6 +5,8 @@
 //          target_link_libraries(app Qt6::Widgets Qt6::Charts Qt6::Sql)
 // ============================================================
 
+#include <QMenu>
+#include <QDir>
 #include <QStandardPaths>
 #include <QApplication>
 #include <QMainWindow>
@@ -42,37 +44,64 @@
 #include <QtCharts/QBarSet>
 #include <QtCharts/QBarCategoryAxis>
 #include <QtCharts/QValueAxis>
+#include <QtMultimedia/QAudioOutput>
+#include <QtMultimedia/QMediaPlayer>
+#include <QUrl>
 
 // ─── DB HELPERS ───────────────────────────────────────────────
 static QSqlDatabase db;
 
 void initDB() {
+    QString path = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QDir dir;
+    if (!dir.exists(path)) {
+        dir.mkpath(path);
+    }
+
     db = QSqlDatabase::addDatabase("QSQLITE");
-    db.setDatabaseName(QStandardPaths::writableLocation(
-        QStandardPaths::AppDataLocation) + "/productivity.db");
-    if (!db.open()) { qWarning() << db.lastError(); return; }
+    db.setDatabaseName(path + "/productivity.db");
+
+    qDebug() << "Database Path:" << path + "/productivity.db";
+
+    if (!db.open()) {
+        qWarning() << "Database Error:" << db.lastError().text();
+        return;
+    }
+
+    // CRITICAL: Turn on Foreign Key support in SQLite explicitly
+    QSqlQuery pragma;
+    pragma.exec("PRAGMA foreign_keys = ON;");
 
     QSqlQuery q;
     q.exec(R"(CREATE TABLE IF NOT EXISTS tasks(
-        id INTEGER PRIMARY KEY, text TEXT, category TEXT,
+        id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, category TEXT,
         deadline TEXT, done INTEGER DEFAULT 0, created TEXT))");
+
     q.exec(R"(CREATE TABLE IF NOT EXISTS habits(
-        id INTEGER PRIMARY KEY, name TEXT, category TEXT,
+        id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, category TEXT,
         streak INTEGER DEFAULT 0))");
+
     q.exec(R"(CREATE TABLE IF NOT EXISTS habit_log(
-        habit_id INTEGER, day TEXT))");
+        habit_id INTEGER, day TEXT,
+        FOREIGN KEY(habit_id) REFERENCES habits(id) ON DELETE CASCADE))");
+
     q.exec(R"(CREATE TABLE IF NOT EXISTS notes(
-        id INTEGER PRIMARY KEY, title TEXT, body TEXT,
+        id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, body TEXT,
         tag TEXT, created TEXT))");
+
     q.exec(R"(CREATE TABLE IF NOT EXISTS goals(
-        id INTEGER PRIMARY KEY, title TEXT, category TEXT,
+        id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, category TEXT,
         deadline TEXT, progress INTEGER DEFAULT 0))");
+
+    // Fixed: Added Foreign Key Cascade connection here
     q.exec(R"(CREATE TABLE IF NOT EXISTS milestones(
-        id INTEGER PRIMARY KEY, goal_id INTEGER,
-        text TEXT, done INTEGER DEFAULT 0))");
+        id INTEGER PRIMARY KEY AUTOINCREMENT, goal_id INTEGER, text TEXT, done INTEGER DEFAULT 0,
+        FOREIGN KEY(goal_id) REFERENCES goals(id) ON DELETE CASCADE))");
+
     q.exec(R"(CREATE TABLE IF NOT EXISTS pomo(
         id INTEGER PRIMARY KEY CHECK(id=1),
         sessions INTEGER DEFAULT 0))");
+
     q.exec("INSERT OR IGNORE INTO pomo(id,sessions) VALUES(1,0)");
 }
 
@@ -153,7 +182,15 @@ public:
         auto *btn = new QPushButton("Add");
         row->addWidget(txtInput,3); row->addWidget(cbCat,1); row->addWidget(dtDeadline,2); row->addWidget(btn);
         lay->addLayout(row);
-        list = new QListWidget(); lay->addWidget(list);
+
+        list = new QListWidget();
+
+        // ─── ENABLE RIGHT-CLICK CONTEXT MENU ──────────────────────────
+        list->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(list, &QListWidget::customContextMenuRequested, this, &TasksWidget::showContextMenu);
+        // ───────────────────────────────────────────────────────────────
+
+        lay->addWidget(list);
         connect(btn, &QPushButton::clicked, this, &TasksWidget::addTask);
         connect(txtInput, &QLineEdit::returnPressed, this, &TasksWidget::addTask);
         loadTasks();
@@ -166,8 +203,8 @@ public:
             auto *item = new QListWidgetItem();
             bool done = q.value(4).toBool();
             QString text = QString("[%1] %2  —  %3  —  %4")
-                .arg(q.value(2).toString(), q.value(1).toString(),
-                     q.value(3).toString(), done ? "✓ done" : "pending");
+                               .arg(q.value(2).toString(), q.value(1).toString(),
+                                    q.value(3).toString(), done ? "✓ done" : "pending");
             item->setText(text);
             item->setData(Qt::UserRole, q.value(0));
             item->setCheckState(done ? Qt::Checked : Qt::Unchecked);
@@ -189,6 +226,31 @@ public:
         loadTasks();
         emit dataChanged();
     }
+
+private slots:
+    // ─── NEW SLOT: HANDLING DELETION FROM POPUP MENU ───────────────
+    void showContextMenu(const QPoint &pos) {
+        auto *item = list->itemAt(pos);
+        if (!item) return; // Right clicked blank space inside the widget
+
+        QMenu menu(this);
+        auto *delAction = menu.addAction("Delete Task");
+
+        // Map the item's local coordinate system to global desktop coordinates
+        auto *selectedAction = menu.exec(list->mapToGlobal(pos));
+
+        if (selectedAction == delAction) {
+            int id = item->data(Qt::UserRole).toInt();
+            QSqlQuery q;
+            q.prepare("DELETE FROM tasks WHERE id=?");
+            q.addBindValue(id);
+            q.exec();
+
+            loadTasks();
+            emit dataChanged();
+        }
+    }
+    // ───────────────────────────────────────────────────────────────
 
 protected:
     void mousePressEvent(QMouseEvent *e) override {
@@ -223,7 +285,15 @@ public:
         auto *btn = new QPushButton("Add");
         row->addWidget(nameInput,3); row->addWidget(cbCat,1); row->addWidget(btn);
         lay->addLayout(row);
-        list = new QListWidget(); lay->addWidget(list);
+
+        list = new QListWidget();
+
+        // ─── ENABLE RIGHT-CLICK CONTEXT MENU ──────────────────────────
+        list->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(list, &QListWidget::customContextMenuRequested, this, &HabitsWidget::showContextMenu);
+        // ───────────────────────────────────────────────────────────────
+
+        lay->addWidget(list);
         connect(btn, &QPushButton::clicked, this, &HabitsWidget::addHabit);
         connect(nameInput, &QLineEdit::returnPressed, this, &HabitsWidget::addHabit);
         connect(list, &QListWidget::itemChanged, this, &HabitsWidget::onCheck);
@@ -235,11 +305,11 @@ public:
         QString today = QDate::currentDate().toString("yyyy-MM-dd");
         QSqlQuery q("SELECT h.id,h.name,h.category,h.streak,"
                     "(SELECT COUNT(*) FROM habit_log WHERE habit_id=h.id AND day='" + today + "') as done "
-                    "FROM habits h");
+                              "FROM habits h");
         while (q.next()) {
             auto *item = new QListWidgetItem(
                 QString("%1  [%2]  — streak: %3 days")
-                .arg(q.value(1).toString(), q.value(2).toString(), q.value(3).toString()));
+                    .arg(q.value(1).toString(), q.value(2).toString(), q.value(3).toString()));
             item->setData(Qt::UserRole, q.value(0));
             item->setCheckState(q.value(4).toInt() ? Qt::Checked : Qt::Unchecked);
             list->addItem(item);
@@ -281,100 +351,265 @@ public:
         loadHabits(); emit dataChanged();
     }
 
+private slots:
+    // ─── NEW SLOT: HANDLING DELETION FROM POPUP MENU ───────────────
+    void showContextMenu(const QPoint &pos) {
+        auto *item = list->itemAt(pos);
+        if (!item) return;
+
+        QMenu menu(this);
+        auto *delAction = menu.addAction("Delete Habit");
+        auto *selectedAction = menu.exec(list->mapToGlobal(pos));
+
+        if (selectedAction == delAction) {
+            int id = item->data(Qt::UserRole).toInt();
+            QSqlQuery q;
+            q.prepare("DELETE FROM habits WHERE id=?");
+            q.addBindValue(id);
+            q.exec();
+
+            loadHabits();
+            emit dataChanged();
+        }
+    }
+    // ───────────────────────────────────────────────────────────────
+
 signals:
     void dataChanged();
 };
 
-// ─── POMODORO ─────────────────────────────────────────────────
-class PomodoroWidget : public QWidget {
+// ─── CUSTOMIZABLE TIMER (REPLACES FOCUS/POMODORO) ─────────────
+class TimerWidget : public QWidget {
     Q_OBJECT
     QTimer *timer;
-    QLabel *timeLbl, *modeLbl, *sessLbl;
+    QMediaPlayer *player;
+    QAudioOutput *audioOutput;
+
+    QLabel *timeDisplay;
+    QProgressBar *progressBar;
+    QSpinBox *minSpin, *secSpin;
+    QComboBox *soundCombo;
     QPushButton *startBtn, *resetBtn;
-    QProgressBar *prog;
-    int remaining, total, sessions = 0;
-    bool isWork = true;
+
+    int totalSeconds = 1500; // Default 25 mins
+    int remainingSeconds = 1500;
+    bool isRunning = false;
+
 public:
-    PomodoroWidget(QWidget *p = nullptr) : QWidget(p) {
-        QSqlQuery q("SELECT sessions FROM pomo WHERE id=1");
-        if (q.next()) sessions = q.value(0).toInt();
-
-        auto *lay = new QVBoxLayout(this);
-        lay->setAlignment(Qt::AlignCenter);
-
-        modeLbl = new QLabel("Focus");
-        modeLbl->setAlignment(Qt::AlignCenter);
-        modeLbl->setStyleSheet("font-size:18px; font-weight:500;");
-
-        timeLbl = new QLabel("25:00");
-        timeLbl->setAlignment(Qt::AlignCenter);
-        timeLbl->setStyleSheet("font-size:72px; font-weight:300; font-family:monospace;");
-
-        prog = new QProgressBar(); prog->setRange(0,100); prog->setValue(0);
-        prog->setFixedHeight(8); prog->setTextVisible(false);
-
-        sessLbl = new QLabel(QString("%1 sessions completed").arg(sessions));
-        sessLbl->setAlignment(Qt::AlignCenter);
-        sessLbl->setStyleSheet("color:gray; font-size:14px;");
-
-        auto *btnRow = new QHBoxLayout();
-        startBtn = new QPushButton("Start"); startBtn->setFixedWidth(120);
-        resetBtn = new QPushButton("Reset"); resetBtn->setFixedWidth(80);
-        btnRow->addStretch(); btnRow->addWidget(startBtn); btnRow->addWidget(resetBtn); btnRow->addStretch();
-
-        lay->addStretch();
-        lay->addWidget(modeLbl); lay->addWidget(timeLbl); lay->addWidget(prog);
-        lay->addLayout(btnRow); lay->addWidget(sessLbl);
-        lay->addStretch();
+    TimerWidget(QWidget *p = nullptr) : QWidget(p) {
+        // Initialize Audio System
+        player = new QMediaPlayer(this);
+        audioOutput = new QAudioOutput(this);
+        player->setAudioOutput(audioOutput);
+        audioOutput->setVolume(0.8); // 80% Volume default
 
         timer = new QTimer(this);
-        setWork();
-        connect(startBtn, &QPushButton::clicked, this, &PomodoroWidget::toggleTimer);
-        connect(resetBtn, &QPushButton::clicked, this, &PomodoroWidget::reset);
-        connect(timer, &QTimer::timeout, this, &PomodoroWidget::tick);
+        connect(timer, &QTimer::timeout, this, &TimerWidget::tick);
+
+        auto *mainLayout = new QVBoxLayout(this);
+        mainLayout->setSpacing(20);
+        mainLayout->setAlignment(Qt::AlignCenter);
+
+        // 1. Large Monospace Time Display
+        timeDisplay = new QLabel("25:00");
+        timeDisplay->setAlignment(Qt::AlignCenter);
+        timeDisplay->setStyleSheet("font-size: 80px; font-weight: 300; font-family: monospace; color: palette(text);");
+        mainLayout->addWidget(timeDisplay);
+
+        // 2. Linear Progress Bar
+        progressBar = new QProgressBar();
+        progressBar->setRange(0, 100);
+        progressBar->setValue(0);
+        progressBar->setFixedHeight(10);
+        progressBar->setTextVisible(false);
+        progressBar->setStyleSheet("QProgressBar { background-color: palette(midlight); border-radius: 5px; }"
+                                   "QProgressBar::chunk { background-color: #3498db; border-radius: 5px; }");
+        mainLayout->addWidget(progressBar);
+
+        // 3. Customization Group Box (The UI Panel)
+        auto *configGroup = new QGroupBox("Timer Configuration");
+        auto *groupLayout = new QGridLayout(configGroup);
+        groupLayout->setSpacing(10);
+
+        // Duration inputs
+        groupLayout->addWidget(new QLabel("Set Minutes:"), 0, 0);
+        minSpin = new QSpinBox();
+        minSpin->setRange(0, 180);
+        minSpin->setValue(25);
+        groupLayout->addWidget(minSpin, 0, 1);
+
+        groupLayout->addWidget(new QLabel("Seconds:"), 0, 2);
+        secSpin = new QSpinBox();
+        secSpin->setRange(0, 59);
+        secSpin->setValue(0);
+        groupLayout->addWidget(secSpin, 0, 3);
+
+        // Sound Selector
+        groupLayout->addWidget(new QLabel("Alert Profile:"), 1, 0);
+        soundCombo = new QComboBox();
+
+        // ─── CHANGED: DYNAMIC SOUND SCANNER ───────────────────────────
+        // Looks for a "sounds" directory sitting right next to the executable
+        QString soundsPath = QApplication::applicationDirPath() + "/sounds";
+        QDir soundsDir(soundsPath);
+
+        // Filter out non-audio files
+        soundsDir.setNameFilters(QStringList() << "*.mp3" << "*.wav" << "*.ogg");
+
+        if (soundsDir.exists() && !soundsDir.entryList().isEmpty()) {
+            for (const QString &filename : soundsDir.entryList(QDir::Files)) {
+                // Strip extension for a clean UI item text (e.g. "chime.mp3" -> "Chime")
+                QString displayName = filename;
+                displayName.remove(".mp3").remove(".wav").remove(".ogg");
+                if (!displayName.isEmpty()) {
+                    displayName[0] = displayName[0].toUpper(); // Capitalize
+                }
+
+                // Visible text is clean name, hidden data is the absolute physical path
+                soundCombo->addItem(displayName, soundsDir.absoluteFilePath(filename));
+            }
+        } else {
+            // Safe fallback item so your UI doesn't look broken
+            soundCombo->addItem("No alert sounds found (.mp3/.wav)", "");
+            qWarning() << "Sounds directory is missing or empty at:" << soundsPath;
+        }
+        // ───────────────────────────────────────────────────────────────
+
+        groupLayout->addWidget(soundCombo, 1, 1, 1, 3);
+        mainLayout->addWidget(configGroup);
+
+        // 4. Control Buttons Layout
+        auto *btnLayout = new QHBoxLayout();
+        startBtn = new QPushButton("Start Focus");
+        startBtn->setMinimumSize(130, 40);
+        startBtn->setStyleSheet("font-weight: bold; background-color: #2ecc71; color: white; border-radius: 6px;");
+
+        resetBtn = new QPushButton("Reset");
+        resetBtn->setMinimumSize(90, 40);
+        resetBtn->setStyleSheet("background-color: palette(button); border-radius: 6px;");
+
+        btnLayout->addStretch();
+        btnLayout->addWidget(startBtn);
+        btnLayout->addWidget(resetBtn);
+        btnLayout->addStretch();
+        mainLayout->addLayout(btnLayout);
+
+        // Wire up control mechanics
+        connect(startBtn, &QPushButton::clicked, this, &TimerWidget::toggleTimer);
+        connect(resetBtn, &QPushButton::clicked, this, &TimerWidget::resetTimer);
+        connect(minSpin, qOverload<int>(&QSpinBox::valueChanged), this, &TimerWidget::updateFromSpins);
+        connect(secSpin, qOverload<int>(&QSpinBox::valueChanged), this, &TimerWidget::updateFromSpins);
+
+        updateDisplay();
     }
 
-    void setWork() { isWork=true; total=remaining=25*60; modeLbl->setText("Focus"); updateDisplay(); }
-    void setBreak(){ isWork=false;total=remaining=5*60; modeLbl->setText("Break"); updateDisplay(); }
-
-    void updateDisplay() {
-        timeLbl->setText(QString("%1:%2")
-            .arg(remaining/60, 2, 10, QChar('0'))
-            .arg(remaining%60, 2, 10, QChar('0')));
-        prog->setValue(100 - int(100.0*remaining/total));
-    }
-
+private slots:
     void toggleTimer() {
-        if (timer->isActive()) { timer->stop(); startBtn->setText("Resume"); }
-        else { timer->start(1000); startBtn->setText("Pause"); }
+        if (isRunning) {
+            timer->stop();
+            isRunning = false;
+            startBtn->setText("Resume");
+            startBtn->setStyleSheet("font-weight: bold; background-color: #f1c40f; color: black; border-radius: 6px;");
+            setInputsEnabled(true);
+        } else {
+            if (remainingSeconds <= 0) return;
+
+            if (remainingSeconds == totalSeconds) {
+                totalSeconds = (minSpin->value() * 60) + secSpin->value();
+                remainingSeconds = totalSeconds;
+            }
+
+            timer->start(1000);
+            isRunning = true;
+            startBtn->setText("Pause");
+            startBtn->setStyleSheet("font-weight: bold; background-color: #e74c3c; color: white; border-radius: 6px;");
+            setInputsEnabled(false);
+        }
     }
 
-    void reset() {
-        timer->stop(); startBtn->setText("Start");
-        if (isWork) setWork(); else setBreak();
+    void resetTimer() {
+        timer->stop();
+        isRunning = false;
+        player->stop();
+
+        totalSeconds = (minSpin->value() * 60) + secSpin->value();
+        remainingSeconds = totalSeconds;
+
+        startBtn->setText("Start Focus");
+        startBtn->setStyleSheet("font-weight: bold; background-color: #2ecc71; color: white; border-radius: 6px;");
+
+        setInputsEnabled(true);
+        updateDisplay();
+    }
+
+    void updateFromSpins() {
+        if (!isRunning) {
+            totalSeconds = (minSpin->value() * 60) + secSpin->value();
+            remainingSeconds = totalSeconds;
+            updateDisplay();
+        }
     }
 
     void tick() {
-        if (--remaining <= 0) {
-            timer->stop(); startBtn->setText("Start");
-            if (isWork) {
-                sessions++;
-                QSqlQuery q;
-                q.prepare("UPDATE pomo SET sessions=? WHERE id=1");
-                q.addBindValue(sessions); q.exec();
-                sessLbl->setText(QString("%1 sessions completed").arg(sessions));
-                emit dataChanged();
-                QMessageBox::information(this, "Pomodoro", "Focus session done! Time for a break.");
-                setBreak();
-            } else {
-                QMessageBox::information(this, "Pomodoro", "Break over — back to focus!");
-                setWork();
-            }
-        } else updateDisplay();
+        if (--remainingSeconds <= 0) {
+            remainingSeconds = 0;
+            timer->stop();
+            updateDisplay();
+
+            startBtn->setText("Completed");
+            startBtn->setEnabled(false);
+
+            playAlertSound();
+
+            QMessageBox::information(this, "Timer Done", "Time's up! Your customization alert is playing.");
+
+            startBtn->setEnabled(true);
+            resetTimer();
+            emit timerFinished();
+        } else {
+            updateDisplay();
+        }
+    }
+
+    // ─── CHANGED: DYNAMIC AUDIO PLAYER LINK ───────────────────────
+    void playAlertSound() {
+        QString soundSource = soundCombo->currentData().toString();
+
+        if (soundSource.isEmpty()) {
+            qWarning() << "No valid local sound file path selected.";
+            return;
+        }
+
+        // Real system file paths must use QUrl::fromLocalFile instead of parsing strings
+        player->setSource(QUrl::fromLocalFile(soundSource));
+        player->play();
+    }
+    // ───────────────────────────────────────────────────────────────
+
+    void updateDisplay() {
+        int mins = remainingSeconds / 60;
+        int secs = remainingSeconds % 60;
+
+        timeDisplay->setText(QString("%1:%2")
+                                 .arg(mins, 2, 10, QChar('0'))
+                                 .arg(secs, 2, 10, QChar('0')));
+
+        if (totalSeconds > 0) {
+            int progressPercent = 100 - ((remainingSeconds * 100) / totalSeconds);
+            progressBar->setValue(progressPercent);
+        } else {
+            progressBar->setValue(100);
+        }
+    }
+
+    void setInputsEnabled(bool enabled) {
+        minSpin->setEnabled(enabled);
+        secSpin->setEnabled(enabled);
+        soundCombo->setEnabled(enabled);
     }
 
 signals:
-    void dataChanged();
+    void timerFinished();
 };
 
 // ─── NOTES ────────────────────────────────────────────────────
@@ -606,7 +841,10 @@ public:
         dash = new DashboardWidget();
         auto *tasksW   = new TasksWidget();
         auto *habitsW  = new HabitsWidget();
-        auto *pomoW    = new PomodoroWidget();
+
+        // FIX 1: Change PomodoroWidget to TimerWidget
+        auto *pomoW    = new TimerWidget();
+
         auto *notesW   = new NotesWidget();
         auto *goalsW   = new GoalsWidget();
 
@@ -621,7 +859,10 @@ public:
         auto refresh = [this]{ dash->refresh(); };
         connect(tasksW,  &TasksWidget::dataChanged,   this, refresh);
         connect(habitsW, &HabitsWidget::dataChanged,  this, refresh);
-        connect(pomoW,   &PomodoroWidget::dataChanged,this, refresh);
+
+        // FIX 2: Change &PomodoroWidget::timerFinished to &TimerWidget::timerFinished
+        connect(pomoW,   &TimerWidget::timerFinished, this, refresh);
+
         connect(notesW,  &NotesWidget::dataChanged,   this, refresh);
         connect(goalsW,  &GoalsWidget::dataChanged,   this, refresh);
     }

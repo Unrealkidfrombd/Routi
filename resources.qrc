@@ -1,0 +1,7 @@
+<!DOCTYPE RCC><RCC version="1.0">
+<qresource prefix="/">
+    <file>sounds/alarm.mp3</file>
+    <file>sounds/beep.mp3</file>
+    <file>sounds/chime.mp3</file>
+</qresource>
+</RCC>

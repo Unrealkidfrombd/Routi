@@ -1,22 +1,60 @@
-# Binaries and Build Folders
-Build/
-ProductivitySuite
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
 *.o
-*.a
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
 *.so
+*.dylib
+*.dll
 
-# CMake Junk
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# CMake build directories & artifacts
+/build/
+/CMakeFiles/
 CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
+CMakeProjectManager.properties
 Makefile
-install_manifest.txt
+cmake_install.cmake
+ninja.build
+.ninja_deps
+.ninja_log
 
-# Qt Generated files
-*.moc
+# Qt Creator & IDE project files
+*.user
+*.user.*
+.qtc_clangd/
+.cmake/
+
+# Qt generated source files
+*_autogen/
+qrc_*.cpp
 moc_*.cpp
 ui_*.h
-*.qrc.cpp
 
-# SQLite database
+# Local Application Data (Don't sync your personal DB or custom sounds!)
 *.db
+*.sqlite
+/build/sounds/

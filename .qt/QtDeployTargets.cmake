@@ -1,0 +1,2 @@
+set(__QT_DEPLOY_TARGET_ProductivitySuite_FILE /run/media/sami/New Volume/Routi/student_organizer/ProductivitySuite)
+set(__QT_DEPLOY_TARGET_ProductivitySuite_TYPE EXECUTABLE)
