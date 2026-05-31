@@ -5,6 +5,11 @@
 //          target_link_libraries(app Qt6::Widgets Qt6::Charts Qt6::Sql)
 // ============================================================
 
+#include <QCoreApplication>
+#include <QStandardPaths>
+#include <QDir>
+#include <QFile>
+#include <QDebug>
 #include <QMenu>
 #include <QDir>
 #include <QStandardPaths>
@@ -52,16 +57,26 @@
 static QSqlDatabase db;
 
 void initDB() {
-    QString path = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    QDir dir;
-    if (!dir.exists(path)) {
-        dir.mkpath(path);
+    // 1. Portable Check: Look right next to the executable first
+    QString localPath = QCoreApplication::applicationDirPath() + "/productivity.db";
+    QString finalDbPath;
+
+    if (QFile::exists(localPath)) {
+        finalDbPath = localPath;
+        qDebug() << "Running in Portable Mode! Database path:" << finalDbPath;
+    } else {
+        // 2. Standard Fallback: Use platform-specific app data sandbox
+        QString path = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        QDir dir;
+        if (!dir.exists(path)) {
+            dir.mkpath(path);
+        }
+        finalDbPath = path + "/productivity.db";
+        qDebug() << "Standard Mode. Database path:" << finalDbPath;
     }
 
     db = QSqlDatabase::addDatabase("QSQLITE");
-    db.setDatabaseName(path + "/productivity.db");
-
-    qDebug() << "Database Path:" << path + "/productivity.db";
+    db.setDatabaseName(finalDbPath);
 
     if (!db.open()) {
         qWarning() << "Database Error:" << db.lastError().text();
@@ -717,6 +732,7 @@ class GoalsWidget : public QWidget {
     QLabel *progLbl;
     QListWidget *msList;
     int currentGoalId = -1;
+
 public:
     GoalsWidget(QWidget *p = nullptr) : QWidget(p) {
         auto *lay = new QVBoxLayout(this);
@@ -732,6 +748,10 @@ public:
 
         auto *split = new QSplitter(Qt::Horizontal);
         goalList = new QListWidget();
+
+        // CRITICAL STEP: Configure the widget to allow custom right-click behaviors
+        goalList->setContextMenuPolicy(Qt::CustomContextMenu);
+
         auto *detailW = new QWidget();
         auto *dlay = new QVBoxLayout(detailW);
         progSlider = new QSlider(Qt::Horizontal); progSlider->setRange(0,100);
@@ -755,17 +775,30 @@ public:
         connect(msBtn, &QPushButton::clicked, this, &GoalsWidget::addMilestone);
         connect(msInput, &QLineEdit::returnPressed, this, &GoalsWidget::addMilestone);
         connect(msList, &QListWidget::itemChanged, this, &GoalsWidget::toggleMilestone);
+
+        // Connect the right-click custom signal to our deletion handler
+        connect(goalList, &QListWidget::customContextMenuRequested, this, &GoalsWidget::showGoalsContextMenu);
+
         loadGoals();
     }
 
     void loadGoals() {
+        // Prevent signal loops or invalid selected indices during clear routines
+        goalList->blockSignals(true);
         goalList->clear();
         QSqlQuery q("SELECT id,title,category,progress,deadline FROM goals");
         while (q.next()) {
             auto *item = new QListWidgetItem(
                 QString("%1  [%2]  %3%").arg(q.value(1).toString(), q.value(2).toString(), q.value(3).toString()));
-            item->setData(Qt::UserRole, q.value(0)); goalList->addItem(item);
+            item->setData(Qt::UserRole, q.value(0));
+
+            // Re-select item if it matches our active goal focus
+            if (q.value(0).toInt() == currentGoalId) {
+                goalList->setCurrentItem(item);
+            }
+            goalList->addItem(item);
         }
+        goalList->blockSignals(false);
     }
 
     void addGoal() {
@@ -779,11 +812,22 @@ public:
     }
 
     void selectGoal(QListWidgetItem *item) {
-        if (!item) return;
+        if (!item) {
+            currentGoalId = -1;
+            msList->clear();
+            progSlider->setValue(0);
+            progLbl->setText("0%");
+            return;
+        }
         currentGoalId = item->data(Qt::UserRole).toInt();
         QSqlQuery q; q.prepare("SELECT progress FROM goals WHERE id=?");
         q.addBindValue(currentGoalId); q.exec();
-        if (q.next()) { progSlider->blockSignals(true); progSlider->setValue(q.value(0).toInt()); progSlider->blockSignals(false); progLbl->setText(q.value(0).toString() + "%"); }
+        if (q.next()) {
+            progSlider->blockSignals(true);
+            progSlider->setValue(q.value(0).toInt());
+            progSlider->blockSignals(false);
+            progLbl->setText(q.value(0).toString() + "%");
+        }
         loadMilestones();
     }
 
@@ -797,6 +841,10 @@ public:
 
     void loadMilestones() {
         msList->blockSignals(true); msList->clear();
+        if (currentGoalId == -1) {
+            msList->blockSignals(false);
+            return;
+        }
         QSqlQuery q; q.prepare("SELECT id,text,done FROM milestones WHERE goal_id=?");
         q.addBindValue(currentGoalId); q.exec();
         while (q.next()) {
@@ -819,6 +867,36 @@ public:
         QSqlQuery q; q.prepare("UPDATE milestones SET done=? WHERE id=?");
         q.addBindValue(item->checkState() == Qt::Checked ? 1 : 0);
         q.addBindValue(item->data(Qt::UserRole)); q.exec();
+    }
+
+    // New Slot: Spawns the contextual right-click menu options
+    void showGoalsContextMenu(const QPoint &pos) {
+        QListWidgetItem *item = goalList->itemAt(pos);
+        if (!item) return;
+
+        QMenu menu(this);
+        QAction *deleteAction = menu.addAction("Delete Goal");
+
+        // Execute menu actions tracking globally on mapping coordinates
+        QAction *selectedAction = menu.exec(goalList->viewport()->mapToGlobal(pos));
+
+        if (selectedAction == deleteAction) {
+            int targetId = item->data(Qt::UserRole).toInt();
+
+            QSqlQuery q;
+            q.prepare("DELETE FROM goals WHERE id=?");
+            q.addBindValue(targetId);
+
+            if (q.exec()) {
+                // If the currently viewed goal is deleted, wipe the state pointers
+                if (targetId == currentGoalId) {
+                    currentGoalId = -1;
+                }
+                loadGoals();
+                loadMilestones();
+                emit dataChanged();
+            }
+        }
     }
 
 signals:
